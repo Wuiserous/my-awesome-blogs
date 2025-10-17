@@ -1,0 +1,73 @@
+{% extends 'base.html' %}
+{% block title %}{{ article.title }}{% endblock %}
+
+{% block content %}
+<style>
+    .article-header { 
+        margin-bottom: 2rem; 
+        border-bottom: 1px solid #eee; 
+        padding-bottom: 1rem; 
+    }
+    .article-title { 
+        font-size: 2.5rem; 
+        margin-bottom: 0.5rem; 
+    }
+    .back-link { 
+        display: inline-block; 
+        margin-bottom: 2rem; 
+        color: #0077ff; 
+        text-decoration: none; 
+    }
+    .article-content { 
+        line-height: 1.7; 
+        font-size: 1.1rem;
+    }
+    /* Styles for the share button */
+    .share-button { 
+        background: #17a2b8; 
+        color: white; 
+        border: none; 
+        padding: 0.6rem 1.2rem; 
+        border-radius: 8px; 
+        cursor: pointer; 
+        font-size: 1rem; 
+        margin-top: 1rem; 
+        transition: background-color 0.2s;
+    }
+    .share-button:hover { 
+        background: #138496; 
+    }
+</style>
+<script>
+  function copyLink() {
+    // Uses the modern Navigator Clipboard API for secure copying
+    navigator.clipboard.writeText(window.location.href).then(() => {
+      const btn = document.getElementById('copyBtn');
+      const originalText = btn.innerText;
+      btn.innerText = '✅ Link Copied!';
+      btn.style.backgroundColor = '#28a745'; // Green for success
+
+      // Revert the button text and color after 2 seconds
+      setTimeout(() => {
+        btn.innerText = originalText;
+        btn.style.backgroundColor = '#17a2b8';
+      }, 2000);
+    }).catch(err => {
+      console.error('Failed to copy text: ', err);
+      alert('Failed to copy the link.');
+    });
+  }
+</script>
+
+<a class="back-link" href="{{ url_for('home') }}">← All Articles</a>
+
+<div class="article-header">
+  <h1 class="article-title">{{ article.title }}</h1>
+  <button id="copyBtn" class="share-button" onclick="copyLink()">Copy Link to Share</button>
+</div>
+
+<!-- This is the most important part for rendering your content -->
+<div class="article-content">
+  {{ article.html_content | safe }}
+</div>
+{% endblock %}
