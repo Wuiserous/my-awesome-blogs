@@ -3,27 +3,39 @@
 import { useEffect, useState, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useMediaStream } from '@/lib/hooks/use-media-stream';
+import { useSpeechRecognition } from '@/lib/hooks/use-speech-recognition';
 import { GeminiLiveClient } from '@/lib/gemini/live-client';
 import { AudioVisualizer } from '@/components/interview/AudioVisualizer';
 import { TimerOverlay } from '@/components/interview/TimerOverlay';
 import { InterviewPhase } from '@/types';
-import { Mic, MicOff, Video, VideoOff, PhoneOff } from 'lucide-react';
+import { Mic, MicOff, Video, VideoOff, PhoneOff, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+
+type TranscriptItem = { speaker: 'user' | 'ai', text: string, timestamp: number };
 
 export default function InterviewPage() {
     const { id } = useParams();
     const router = useRouter();
     const { stream, error } = useMediaStream();
+    const { start: startSpeech, stop: stopSpeech, text: userSpeechText, isListening } = useSpeechRecognition();
+
+    // Timer State (Lifted Up)
+    const DURATION = 420; // 7 mins
+    const [timeLeft, setTimeLeft] = useState(DURATION);
     const [phase, setPhase] = useState<InterviewPhase>('warmup');
+
     const [isConnected, setIsConnected] = useState(false);
     const [isMicOn, setIsMicOn] = useState(true);
     const [isCamOn, setIsCamOn] = useState(true);
+    const [isGeneratingReport, setIsGeneratingReport] = useState(false);
 
     const clientRef = useRef<GeminiLiveClient | null>(null);
     const videoRef = useRef<HTMLVideoElement>(null);
     const audioContextRef = useRef<AudioContext | null>(null);
     const audioQueue = useRef<string[]>([]);
     const isPlayingRef = useRef(false);
+
+    const transcriptRef = useRef<TranscriptItem[]>([]);
 
     // Initialize Audio Context once
     useEffect(() => {
@@ -32,6 +44,20 @@ export default function InterviewPage() {
             audioContextRef.current?.close();
         };
     }, []);
+
+    // Speech Recognition Sync
+    useEffect(() => {
+        if (userSpeechText) {
+            const lastItem = transcriptRef.current[transcriptRef.current.length - 1];
+            // Simple debouncing/grouping: if speaker is user and time diff < 2s, append
+            const now = DURATION - timeLeft;
+            if (lastItem && lastItem.speaker === 'user' && (now - lastItem.timestamp) < 5) {
+                lastItem.text = userSpeechText; // Update dynamic
+            } else {
+                transcriptRef.current.push({ speaker: 'user', text: userSpeechText, timestamp: now });
+            }
+        }
+    }, [userSpeechText, timeLeft]);
 
     const playNextChunk = async () => {
         if (isPlayingRef.current || audioQueue.current.length === 0 || !audioContextRef.current) return;
@@ -47,15 +73,11 @@ export default function InterviewPage() {
                 bytes[i] = binaryString.charCodeAt(i);
             }
 
-            // For PCM 24kHz (Gemini default), we can't use decodeAudioData easily without a WAV header.
-            // But we can create a buffer manually.
-            // Gemini sends raw Int16 Little Endian PCM at 24kHz.
-
             const float32Data = new Float32Array(len / 2);
             const dataView = new DataView(bytes.buffer);
 
             for (let i = 0; i < len / 2; i++) {
-                const int16 = dataView.getInt16(i * 2, true); // Little Endian
+                const int16 = dataView.getInt16(i * 2, true);
                 float32Data[i] = int16 / 32768.0;
             }
 
@@ -80,43 +102,45 @@ export default function InterviewPage() {
         }
     };
 
-    // Initialize Client
+    // Initialize Client & Speech
     useEffect(() => {
         const initClient = async () => {
             try {
-                // In production, fetch this from API. For now, we point to our local Proxy.
-                // Note: The Proxy runs on 8080 by default in server-proxy.js
-                // In a real deployed Next.js app, we'd use a different strategy.
                 const wsUrl = 'ws://localhost:8080';
-
                 const client = new GeminiLiveClient(wsUrl);
 
                 client.on('connected', () => {
                     setIsConnected(true);
                     console.log("Connected to Gemini Proxy");
+                    startSpeech(); // Start listening to user
 
                     // Trigger AI
                     setTimeout(() => {
                         console.log("Triggering AI Intro...");
                         client.sendText("Hello. I am ready for the interview. Please introduce yourself and start.");
-                    }, 1500); // 1.5s delay
+                    }, 1500);
                 });
 
                 client.on('audio', (base64Audio: string) => {
-                    console.log("Received Audio Chunk:", base64Audio.substring(0, 20) + "...");
                     audioQueue.current.push(base64Audio);
                     playNextChunk();
                 });
 
+                client.on('content', (text: string) => {
+                    // Capture AI Text
+                    const now = DURATION - timeLeft;
+                    transcriptRef.current.push({ speaker: 'ai', text, timestamp: now });
+                    console.log("AI:", text);
+                });
+
                 client.on('disconnected', () => {
                     setIsConnected(false);
-                    console.log("Disconnected from Gemini Proxy");
+                    stopSpeech();
                 });
 
                 client.on('error', (err: any) => {
-                    console.error("Gemini Client Error:", err);
+                    console.error("Gemini Error:", err);
                     setIsConnected(false);
-                    // Optional: Show toast or UI error
                 });
 
                 client.connect(); // Connects to proxy
@@ -130,7 +154,9 @@ export default function InterviewPage() {
 
         return () => {
             clientRef.current?.disconnect();
+            stopSpeech();
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     // Audio Pipeline
@@ -192,37 +218,108 @@ export default function InterviewPage() {
         }
     }, [stream]);
 
-    // Toggle Tracks
+    // Timer Logic & System Injections
     useEffect(() => {
+        if (timeLeft <= 0) {
+            handleTimeEnd();
+            return;
+        }
+
+        const interval = setInterval(() => {
+            setTimeLeft((prev) => {
+                const newValue = prev - 1;
+
+                // Phase Logic
+                const elapsed = DURATION - newValue;
+                if (elapsed < 60) setPhase('warmup');
+                else if (elapsed < 180) setPhase('frontend');
+                else if (elapsed < 300) setPhase('backend');
+                else if (elapsed < 360) setPhase('behavioral');
+                else setPhase('rapid_fire');
+
+                // System Injections
+                if (newValue === 300) clientRef.current?.sendText("[SYSTEM: 5 minutes remaining. Move to Frontend Technical questions.]");
+                if (newValue === 180) clientRef.current?.sendText("[SYSTEM: 3 minutes remaining. Move to Backend System Design.]");
+                if (newValue === 60) clientRef.current?.sendText("[SYSTEM: 1 minute remaining. Start Behavioral checks.]");
+                if (newValue === 10) clientRef.current?.sendText("[SYSTEM: 10 seconds remaining. Wrap up quickly.]");
+
+                return newValue;
+            });
+        }, 1000);
+
+        return () => clearInterval(interval);
+    }, [timeLeft]);
+
+    // Handle Mic Toggle
+    useEffect(() => {
+        if (isMicOn) startSpeech();
+        else stopSpeech();
+        // Media stream track toggle logic existing...
         if (stream) {
             stream.getAudioTracks().forEach(t => t.enabled = isMicOn);
             stream.getVideoTracks().forEach(t => t.enabled = isCamOn);
         }
     }, [isMicOn, isCamOn, stream]);
 
-    const handleTimeEnd = () => {
-        // End interview
-        router.push(`/report/${id}`);
+    const handleTimeEnd = async () => {
+        if (isGeneratingReport) return;
+        setIsGeneratingReport(true);
+        clientRef.current?.disconnect(); // Stop interview
+        stopSpeech();
+
+        console.log("Generating Report for Transcript:", transcriptRef.current);
+
+        try {
+            // Call API to generate report
+            const res = await fetch('/api/report/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    transcript: transcriptRef.current,
+                    interviewId: id
+                })
+            });
+
+            if (res.ok) {
+                router.push(`/report/${id}`);
+            } else {
+                console.error("Report Generation Failed");
+                // Navigate anyway to show partial/mock or error
+                router.push(`/report/${id}`);
+            }
+        } catch (e) {
+            console.error("Report Gen Error", e);
+            router.push(`/report/${id}`);
+        }
     };
 
-    // Phase Logic (Mocked time-based transitions for the UI demo)
-    // In real implementation, the TimerOverlay driving this state is usually fine or the AI drives it.
-    useEffect(() => {
-        // Mock phase transitions for demonstration
-        const timer = setTimeout(() => {
-            setPhase('frontend');
-        }, 60000);
-        return () => clearTimeout(timer);
-    }, []);
+    if (isGeneratingReport) {
+        return (
+            <div className="min-h-screen bg-black flex flex-col items-center justify-center text-white space-y-4">
+                <Loader2 className="w-12 h-12 animate-spin text-blue-500" />
+                <h2 className="text-xl font-light">Generating Intelligence Report...</h2>
+                <p className="text-gray-500">Analyzing {transcriptRef.current.length} interactions</p>
+            </div>
+        )
+    }
 
     return (
         <div className="relative min-h-screen bg-black text-white overflow-hidden flex flex-col items-center justify-center">
-            {/* Timer & Overlay */}
-            <TimerOverlay
-                durationSeconds={420}
-                onTimeEnd={handleTimeEnd}
-                currentPhase={phase}
-            />
+            {/* Timer & Overlay - Controlled Component Now */}
+            <div className="fixed top-0 left-0 w-full z-50 pointer-events-none">
+                <div className="h-1 bg-gray-800 w-full">
+                    <div
+                        className={`h-full transition-all duration-1000 ease-linear ${timeLeft < 60 ? "bg-red-600" : "bg-blue-600"}`}
+                        style={{ width: `${(timeLeft / DURATION) * 100}%` }}
+                    />
+                </div>
+                <div className="absolute top-4 right-8 bg-black/80 text-white px-4 py-2 rounded-full font-mono text-xl border border-white/10 backdrop-blur-md">
+                    {Math.floor(timeLeft / 60)}:{String(timeLeft % 60).padStart(2, '0')}
+                    <span className="ml-2 text-xs text-gray-400 uppercase tracking-widest border-l border-gray-600 pl-2">
+                        {phase}
+                    </span>
+                </div>
+            </div>
 
             <div className="flex-1 w-full max-w-6xl p-4 grid grid-cols-1 md:grid-cols-2 gap-8 items-center h-full">
 
@@ -234,6 +331,7 @@ export default function InterviewPage() {
                     <div className="text-center space-y-2">
                         <h2 className="text-2xl font-light tracking-wider font-mono">GEMINI LIVE</h2>
                         <p className="text-sm text-gray-500 uppercase tracking-widest">{isConnected ? "Listening..." : "Connecting..."}</p>
+                        {isListening && <p className="text-xs text-green-500">Mic Active</p>}
                     </div>
 
                     <AudioVisualizer stream={stream} />

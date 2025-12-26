@@ -34,11 +34,14 @@ export class GeminiLiveClient extends EventEmitter {
         const data = JSON.parse(msgStr);
         this.emit('data', data);
 
-        // Handle Server Content (Audio)
+        // Handle Server Content (Audio & Text)
         if (data.serverContent?.modelTurn?.parts) {
             for (const part of data.serverContent.modelTurn.parts) {
                 if (part.inlineData && part.inlineData.mimeType.startsWith('audio/pcm')) {
                     this.emit('audio', part.inlineData.data);
+                }
+                if (part.text) {
+                    this.emit('content', part.text);
                 }
             }
         }
@@ -62,7 +65,7 @@ export class GeminiLiveClient extends EventEmitter {
       setup: {
         model: "models/gemini-2.5-flash-native-audio-preview-12-2025",
         generation_config: {
-          response_modalities: ["AUDIO"],
+          response_modalities: ["AUDIO", "TEXT"],
           speech_config: {
             voice_config: { prebuilt_voice_config: { voice_name: "Puck" } }
           }
